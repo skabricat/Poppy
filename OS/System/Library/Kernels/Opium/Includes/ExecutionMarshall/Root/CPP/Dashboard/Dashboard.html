@@ -1,0 +1,38 @@
+<meta charset="UTF-8">
+<link href="Style.css" rel="stylesheet">
+<div id="auth">
+	<form id="authForm">
+		<b>Socket</b>
+		<input type="text" id="socketPath" placeholder="Path" style="width: 384px;" value="/tmp/RootServer.sock">
+		<input type="text" id="socketToken" placeholder="Undirected token" style="width: 384px;">
+		<button type="submit">Connect</button>
+	</form>
+</div>
+<template id="clientTemplate">
+	<div class="client-interface">
+		<div class="horizontal" style="height: 65vh;">
+			<div class="input" style="width: 55vw;">
+				<textarea class="inputText" spellcheck="false"></textarea>
+				<div class="inputLint"></div>
+			</div>
+			<div class="treesOutput">
+				<div class="buttons">
+					<button class="tokensTree" current_>Tokens</button>
+					<button class="ASTTree">AST</button>
+					<button class="compositesTree">Composites</button>
+					<button class="interpret">Interpret</button>
+				</div>
+				<textarea class="tokensOutput" readonly></textarea>
+				<textarea class="ASTOutput" readonly style="display: none;"></textarea>
+				<textarea class="compositesOutput" readonly style="display: none;"></textarea>
+			</div>
+		</div>
+		<div class="consoleOutput"></div>
+		<input type="text" class="consoleInput">
+	</div>
+</template>
+<div id="tabsContainer">
+	<button onclick="client.end();"><b>Socket</b></button>
+</div>
+<div id="clientViews"></div>
+<script src="Script.js"></script>
