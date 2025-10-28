@@ -1,0 +1,15 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Opium",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/OS/System/Library/Kernels/Opium",
+            "args": ["-v"],
+            "cwd": "${workspaceFolder}/OS",
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb"
+        }
+    ]
+}

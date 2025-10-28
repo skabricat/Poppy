@@ -1,0 +1,31 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build - Release",
+            "type": "shell",
+            "command": "time g++ -std=c++26 -I Includes Opium.cpp -o ../Opium -O2 -DNDEBUG",
+            "options": {
+                "cwd": "${workspaceFolder}/OS/System/Library/Kernels/Opium/"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "Build - Debug",
+            "type": "shell",
+            "command": "time g++ -std=c++26 -I Includes Opium.cpp -o ../Opium -g -D_GLIBCXX_DEBUG",
+            "options": {
+                "cwd": "${workspaceFolder}/OS/System/Library/Kernels/Opium/"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$gcc"]
+        }
+    ]
+}
