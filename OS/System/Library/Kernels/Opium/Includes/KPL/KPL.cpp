@@ -1,3 +1,5 @@
+#pragma once
+
 #ifdef __FreeBSD__
     #include "Ports/FreeBSD.cpp"
 #elifdef __linux__

@@ -2,9 +2,9 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Build - Release",
+            "label": "Opium - FreeBSD x64 (Release)",
             "type": "shell",
-            "command": "time g++ -std=c++26 -I Includes Opium.cpp -o ../Opium -O2 -DNDEBUG",
+            "command": "time clang++ -std=c++26 -I Includes Opium.cpp -o ../Opium.FreeBSD-x64 -O2 -D NDEBUG -D __FreeBSD__",
             "options": {
                 "cwd": "${workspaceFolder}/OS/System/Library/Kernels/Opium/"
             },
@@ -15,9 +15,22 @@
             "problemMatcher": ["$gcc"]
         },
         {
-            "label": "Build - Debug",
+            "label": "Opium - Linux x64 (Release)",
             "type": "shell",
-            "command": "time g++ -std=c++26 -I Includes Opium.cpp -o ../Opium -g -D_GLIBCXX_DEBUG",
+            "command": "time g++ -std=c++26 -I Includes Opium.cpp -o ../Opium.Linux-x64 -O2 -D NDEBUG -D __linux__",
+            "options": {
+                "cwd": "${workspaceFolder}/OS/System/Library/Kernels/Opium/"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "Opium  - Linux x64 (Debug)",
+            "type": "shell",
+            "command": "time g++ -std=c++26 -I Includes Opium.cpp -o ../Opium.Linux-x64 -g -D _GLIBCXX_DEBUG -D __linux__",
             "options": {
                 "cwd": "${workspaceFolder}/OS/System/Library/Kernels/Opium/"
             },

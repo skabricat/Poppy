@@ -1,3 +1,3 @@
-namespace KPL {
+#pragma once
 
-};
+namespace KPL {};

@@ -1,22 +1,22 @@
 {
     "configurations": [
         {
-            "name": "Opium - FreeBSD Clang x64",
+            "name": "Opium - FreeBSD x64",
             "includePath": [
                 "${workspaceFolder}/OS/System/Library/Kernels/Opium/Includes"
             ],
-            "defines": ["__FreeBSD__=1"],
+            "defines": ["__FreeBSD__"],
             "compilerPath": "/usr/bin/clang++",
             "cStandard": "c17",
             "cppStandard": "gnu++23",
             "intelliSenseMode": "clang-x64"
         },
         {
-            "name": "Opium - Linux GCC x64",
+            "name": "Opium - Linux x64",
             "includePath": [
                 "${workspaceFolder}/OS/System/Library/Kernels/Opium/Includes"
             ],
-            "defines": ["__linux__=1"],
+            "defines": ["__linux__"],
             "compilerPath": "/usr/bin/g++",
             "cStandard": "c17",
             "cppStandard": "gnu++23",
