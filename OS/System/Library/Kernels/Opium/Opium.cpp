@@ -12,17 +12,18 @@ int main() {
     auto& fb0 = IOKit::registerDevice<IOKit::IOFrameBuffer>(2, "fb0");
     int serialMajorID = 3;
     int serialMinorID = 0;
+    auto deviceID = BSD::IO::createDeviceID(serialMajorID, serialMinorID);
     auto& serial = IOKit::registerDevice<IOKit::IOSerialDevice>(serialMajorID, "tty.serial0");
     serial.connect();
     console.addTarget(fb0.ID);
 
     auto serialDeviceSwitch = make_shared<BSD::IO::CharacterDeviceSwitch>();
-    serialDeviceSwitch->write = [&](BSD::IO::DeviceID dev, const string& s){ serial.write(s); return 0; };
-    serialDeviceSwitch->read = [&](BSD::IO::DeviceID dev){ return serial.read(); };
+    serialDeviceSwitch->write = [&](BSD::IO::DeviceID device, const string& s){ serial.write(s); return 0; };
+    serialDeviceSwitch->read = [&](BSD::IO::DeviceID device){ return serial.read(); };
     BSD::IO::addCharacterDeviceSwitch(serialMajorID, serialDeviceSwitch);
+    BSD::IO::addCharacterDevice(deviceID, "tty0");
 
     auto& terminal = BSD::TTY::createTerminal(100);
-    auto deviceID = BSD::IO::createDeviceID(serialMajorID, serialMinorID);
     terminal.attachDevice(deviceID);
     serial.onDataReceived.push_back([&](const string& data) {
         terminal.pushInput(data);
@@ -37,9 +38,8 @@ int main() {
     cout << "TTY read(): " << terminal.read() << endl;
     cout << "\nFramebuffer content:\n" << fb0.read() << endl;
 
-    auto devfs = make_shared<BSD::VFS::DeviceFileSystem>();
-    devfs->createVirtualNode(true, deviceID, "tty0");
-    BSD::VFS::mount("/dev", devfs);
+    BSD::VFS::addVirtualFileSystem(BSD::VFS::DeviceFS::deviceFileSystem);
+    BSD::VFS::mount("/dev", "devfs");
 
     cout << "Writing to /dev/tty0 via VFS...\n";
     BSD::VFS::write("/dev/tty0", "echo test\n");

@@ -12,7 +12,7 @@ namespace BSD::TTY {
         vector<char> outputBuffer;
         BSD::IO::DeviceID deviceID = 0;
 
-        void attachDevice(BSD::IO::DeviceID dev) { deviceID = dev; }
+        void attachDevice(BSD::IO::DeviceID device) { deviceID = device; }
 
         void pushInput(const string &s) {
             inputBuffer.insert(inputBuffer.end(), s.begin(), s.end());
@@ -27,7 +27,7 @@ namespace BSD::TTY {
         void write(const string& s) {
             outputBuffer.insert(outputBuffer.end(), s.begin(), s.end());
             int majorID = BSD::IO::getMajorID(deviceID);
-            if (BSD::IO::characterDeviceSwitches.contains(majorID))
+            if(BSD::IO::characterDeviceSwitches.contains(majorID))
                 BSD::IO::characterDeviceSwitches[majorID]->write(deviceID, s);
         }
     };
