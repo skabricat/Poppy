@@ -4,22 +4,21 @@
 
 namespace IOKit {
     struct IODevice {
-        usize id = 0;                // уникальный ID устройства
-        string name;                 // имя, например "tty0" или "console"
-        bool isOpen = false;         // открыт ли дескриптор
-        usize ownerPID = 0;          // PID процесса, который открыл устройство
+        size_t ID = 0;
+        string name;
+        bool isOpen = false;
+        size_t ownerPID = 0;
 
-        // Подписчики (наблюдатели)
         vector<function<void(const string&)>> onDataReceived;
         vector<function<void(const string&)>> onDataSent;
 
         IODevice() = default;
         virtual ~IODevice() = default;
 
-        virtual bool open(usize pid) {
+        virtual bool open(size_t PID) {
             if (isOpen) return false;
             isOpen = true;
-            ownerPID = pid;
+            ownerPID = PID;
             return true;
         }
 
@@ -40,11 +39,11 @@ namespace IOKit {
         }
     };
 
-    unordered_map<usize, unique_ptr<IODevice>> deviceRegistry;
+    unordered_map<size_t, unique_ptr<IODevice>> deviceRegistry;
 
     struct IOSerialDevice : IODevice {
-        vector<char> inputBuffer;    // данные, которые устройство сам получил от физики
-        vector<char> outputBuffer;   // данные, которые были записаны в устройство (для inspect)
+        vector<char> inputBuffer;    // данные, которые устройство само получило от физики
+        vector<char> outputBuffer;   // данные, которые были записаны в устройство
         bool connected = false;
 
         virtual bool connect() { connected = true; return true; }
@@ -53,12 +52,12 @@ namespace IOKit {
         void write(const string &data) override {
             // записываем в локальный буфер (в реале — передаём на линию)
             outputBuffer.insert(outputBuffer.end(), data.begin(), data.end());
-            notifyDataSent(data); // например, логируем или пересылаем дальше
+            notifyDataSent(data);
         }
 
         void pushFromHardware(const string &data) {
             inputBuffer.insert(inputBuffer.end(), data.begin(), data.end());
-            notifyDataReceived(data); // уведомляем всех подписчиков
+            notifyDataReceived(data);
         }
 
         string read() override {
@@ -69,7 +68,7 @@ namespace IOKit {
     };
 
     struct IOFrameBuffer : IODevice {
-        string framebufferLog; // текстовая репрезентация вывода для модели
+        string framebufferLog;
 
         void drawText(const string &text) {
             framebufferLog += text;
@@ -85,21 +84,21 @@ namespace IOKit {
     };
 
     struct IOConsole : IODevice {
-        vector<usize> branchTargets;
+        vector<size_t> branchTargets;
 
-        void addTarget(usize devId) {
-            for (auto id : branchTargets) if (id == devId) return;
+        void addTarget(size_t devId) {
+            for (auto ID : branchTargets) if (ID == devId) return;
             branchTargets.push_back(devId);
         }
 
-        void removeTarget(usize devId) {
+        void removeTarget(size_t devId) {
             branchTargets.erase(
                 remove(branchTargets.begin(), branchTargets.end(), devId),
                 branchTargets.end());
         }
 
         void write(const string &data) override {
-            for (usize targetID : branchTargets) {
+            for (size_t targetID : branchTargets) {
                 auto it = deviceRegistry.find(targetID);
                 if (it == deviceRegistry.end()) continue;
                 IODevice *dev = it->second.get();
@@ -109,17 +108,17 @@ namespace IOKit {
     };
 
     template<typename T, typename... Args>
-    T& registerDevice(usize id, const string& name, Args&&... args) {
+    T& registerDevice(size_t ID, const string& name, Args&&... args) {
         auto dev = make_unique<T>(forward<Args>(args)...);
-        dev->id = id;
+        dev->ID = ID;
         dev->name = name;
         auto& ref = *dev;
-        deviceRegistry[id] = move(dev);
+        deviceRegistry[ID] = move(dev);
         return ref;
     }
 
-    IODevice* getDevice(usize id) {
-        auto it = deviceRegistry.find(id);
+    IODevice* getDevice(size_t ID) {
+        auto it = deviceRegistry.find(ID);
         return (it != deviceRegistry.end()) ? it->second.get() : nullptr;
     }
 }
