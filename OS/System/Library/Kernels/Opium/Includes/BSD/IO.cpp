@@ -1,36 +1,39 @@
 #pragma once
 
 #include "Std.cpp"
+#include "BSD/EventHandler.cpp"
 
 namespace BSD::IO {
-    using DeviceID = uint32_t;
+    using DeviceID = uint64_t;
+    using MajorID = uint32_t;
+    using MinorID = uint32_t;
 
-    int nextMajorID = 1;
-    unordered_map<int, int> nextMinorForMajor;
+    MajorID nextMajorID = 1;
+    unordered_map<MajorID, MinorID> nextMinorForMajor;
     EventHandler<DeviceID, bool> deviceEventHandler;  // isCharacter
 
-    DeviceID createDeviceID(int majorID, int minorID) {
-        return ((majorID & 0xFF) << 8) | (minorID & 0xFF);
+    DeviceID createDeviceID(MajorID majorID, MinorID minorID) {
+        return (static_cast<uint64_t>(majorID) << 32) | minorID;
     }
 
-    int getMajorID(DeviceID d) {
-        return (d >> 8) & 0xFF;
+    MajorID getMajorID(DeviceID deviceID) {
+        return deviceID >> 32;
     }
 
-    int getMinorID(DeviceID d) {
-        return d & 0xFF;
+    MinorID getMinorID(DeviceID deviceID) {
+        return deviceID & 0xFFFFFFFF;
     }
 
     DeviceID allocateDeviceID() {
-        int majorID = nextMajorID++;
-        int minorID = 0;
+        MajorID majorID = nextMajorID++;
+        MinorID minorID = 0;
         nextMinorForMajor[majorID] = 1;
 
         return createDeviceID(majorID, minorID);
     }
 
-    DeviceID allocateDeviceID(int majorID) {
-        int minorID = nextMinorForMajor[majorID]++;
+    DeviceID allocateDeviceID(MajorID majorID) {
+        MinorID minorID = nextMinorForMajor[majorID]++;
 
         return createDeviceID(majorID, minorID);
     }
@@ -49,7 +52,7 @@ namespace BSD::IO {
         string name;
     };
 
-    unordered_map<int, shared_ptr<BlockDeviceSwitch>> blockDeviceSwitches;
+    unordered_map<MajorID, shared_ptr<BlockDeviceSwitch>> blockDeviceSwitches;
     unordered_map<DeviceID, shared_ptr<BlockDevice>> blockDevices;
 
     void addBlockDeviceSwitch(int majorID, shared_ptr<BlockDeviceSwitch> sw) {
@@ -57,7 +60,7 @@ namespace BSD::IO {
     }
 
     shared_ptr<BlockDevice> addBlockDevice(DeviceID ID, const string& name) {
-        int majorID = getMajorID(ID);
+        MajorID majorID = getMajorID(ID);
 
         auto it = blockDeviceSwitches.find(majorID);
         if(it == blockDeviceSwitches.end())
@@ -101,15 +104,15 @@ namespace BSD::IO {
         string name;
     };
 
-    unordered_map<int, shared_ptr<CharacterDeviceSwitch>> characterDeviceSwitches;
+    unordered_map<MajorID, shared_ptr<CharacterDeviceSwitch>> characterDeviceSwitches;
     unordered_map<DeviceID, shared_ptr<CharacterDevice>> characterDevices;
 
-    void addCharacterDeviceSwitch(int majorID, shared_ptr<CharacterDeviceSwitch> sw) {
+    void addCharacterDeviceSwitch(MajorID majorID, shared_ptr<CharacterDeviceSwitch> sw) {
         characterDeviceSwitches[majorID] = sw;
     }
 
     shared_ptr<CharacterDevice> addCharacterDevice(DeviceID ID, const string& name) {
-        int majorID = getMajorID(ID);
+        MajorID majorID = getMajorID(ID);
 
         auto it = characterDeviceSwitches.find(majorID);
         if(it == characterDeviceSwitches.end())

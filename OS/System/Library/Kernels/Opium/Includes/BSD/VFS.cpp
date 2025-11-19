@@ -13,6 +13,7 @@ namespace BSD::VFS {
 
     struct VirtualFileSystem {
         string name;
+        int mountCount = 0;
 
         struct Operations {
             function<void()> init;
@@ -24,8 +25,8 @@ namespace BSD::VFS {
     };
 
     struct VirtualNode {
-        enum class Type { None, Regular, Directory, Block, Character, Link, FIFO, Socket, Bad } type = Type::None;
-        BSD::IO::DeviceID deviceID = 0;
+        enum class Type { None, Regular, Directory, Block, Character, Link, Pipe, Socket, Bad } type = Type::None;
+        IO::DeviceID deviceID = 0;
 
         struct Operations {
             function<void(VNSP)> open;
@@ -79,6 +80,7 @@ namespace BSD::VFS {
 
         if(success) {
             mountPoints.push_back(MP);
+            VFS->mountCount++;
             cout << "Mounted FS at " << path << "\n";
         } else {
             cerr << "Mount aborted for: " << path << "\n";
@@ -97,36 +99,36 @@ namespace BSD::VFS {
     }
 
     string read(const string& path) {
-        auto VN = lookup(path);
-        if(VN && VN->operations.read) return VN->operations.read(VN);
+        auto virtualNode = lookup(path);
+        if(virtualNode && virtualNode->operations.read) return virtualNode->operations.read(virtualNode);
         return "";
     }
 
     void write(const string& path, const string& data) {
-        auto VN = lookup(path);
-        if(VN && VN->operations.write) VN->operations.write(VN, data);
+        auto virtualNode = lookup(path);
+        if(virtualNode && virtualNode->operations.write) virtualNode->operations.write(virtualNode, data);
     }
 }
 
 namespace BSD::VFS::SpecialFS {
-    auto VNO = VirtualNode::Operations {
-        .read = [](VNSP VN) -> string {
-            if(!VN) return "";
-            if(VN->type == VirtualNode::Type::Block) {}  // TODO
-            if(VN->type == VirtualNode::Type::Character) {
-                int majorID = BSD::IO::getMajorID(VN->deviceID);
-                if(BSD::IO::characterDeviceSwitches.contains(majorID))
-                    return BSD::IO::characterDeviceSwitches[majorID]->read(VN->deviceID);
+    auto virtualNodeOperations = VirtualNode::Operations {
+        .read = [](VNSP virtualNode) -> string {
+            if(!virtualNode) return "";
+            if(virtualNode->type == VirtualNode::Type::Block) {}  // TODO
+            if(virtualNode->type == VirtualNode::Type::Character) {
+                int majorID = IO::getMajorID(virtualNode->deviceID);
+                if(IO::characterDeviceSwitches.contains(majorID))
+                    return IO::characterDeviceSwitches[majorID]->read(virtualNode->deviceID);
             }
             return "";
         },
-        .write = [](VNSP VN, const string& data) {
-            if(!VN) return;
-            if(VN->type == VirtualNode::Type::Block) {}  // TODO
-            if(VN->type == VirtualNode::Type::Character) {
-                int majorID = BSD::IO::getMajorID(VN->deviceID);
-                if(BSD::IO::characterDeviceSwitches.contains(majorID))
-                    BSD::IO::characterDeviceSwitches[majorID]->write(VN->deviceID, data);
+        .write = [](VNSP virtualNode, const string& data) {
+            if(!virtualNode) return;
+            if(virtualNode->type == VirtualNode::Type::Block) {}  // TODO
+            if(virtualNode->type == VirtualNode::Type::Character) {
+                int majorID = IO::getMajorID(virtualNode->deviceID);
+                if(IO::characterDeviceSwitches.contains(majorID))
+                    IO::characterDeviceSwitches[majorID]->write(virtualNode->deviceID, data);
             }
         }
     };
@@ -136,8 +138,8 @@ namespace BSD::VFS::DeviceFS {
     struct IndexNode {
         string name;
         bool isCharacter;
-        BSD::IO::DeviceID deviceID;
-        weak_ptr<VirtualNode> VN;  // Cache
+        IO::DeviceID deviceID;
+        weak_ptr<VirtualNode> virtualNode;  // Cache
     };
 
     unordered_map<string, shared_ptr<IndexNode>> indexNodes;
@@ -148,7 +150,7 @@ namespace BSD::VFS::DeviceFS {
         return path.substr(pos+1);
     }
 
-    void createDeviceNode(bool isCharacter, BSD::IO::DeviceID deviceID, const string& name) {
+    void createDeviceNode(bool isCharacter, IO::DeviceID deviceID, const string& name) {
         cout << "[devfs] Created node: " << name << endl;
         indexNodes[name] = make_shared<IndexNode>(IndexNode {
             .name = name,
@@ -157,23 +159,39 @@ namespace BSD::VFS::DeviceFS {
         });
     }
 
-    void init() {
-        for(auto& [deviceID, device] : BSD::IO::blockDevices) {
-            if(device) createDeviceNode(false, deviceID, device->name);
-        }
-        for(auto& [deviceID, device] : BSD::IO::characterDevices) {
-            if(device) createDeviceNode(true, deviceID, device->name);
+    void updateDeviceNode(IO::DeviceID deviceID, bool isCharacter) {
+        string name;
+
+        if(!isCharacter) {
+            if(auto device = IO::getBlockDevice(deviceID)) {
+                name = device->name;
+            }
+        } else {
+            if(auto device = IO::getCharacterDevice(deviceID)) {
+                name = device->name;
+            }
         }
 
-        int hookID = BSD::IO::deviceEventHandler.add([](BSD::IO::DeviceID deviceID, bool isCharacter) {
-            if(!isCharacter) {
-                auto device = BSD::IO::getBlockDevice(deviceID);
-                if(device) createDeviceNode(isCharacter, deviceID, device->name);
-            } else {
-                auto device = BSD::IO::getCharacterDevice(deviceID);
-                if(device) createDeviceNode(isCharacter, deviceID, device->name);
+        if(!name.empty()) {
+            createDeviceNode(isCharacter, deviceID, name);
+        } else {
+            // destroyDeviceNode(name);
+        }
+    }
+
+    void init() {
+        for(auto& [deviceID, device] : IO::blockDevices) {
+            if(device && !device->name.empty()) {
+                createDeviceNode(false, deviceID, device->name);
             }
-        });
+        }
+        for(auto& [deviceID, device] : IO::characterDevices) {
+            if(device && !device->name.empty()) {
+                createDeviceNode(true, deviceID, device->name);
+            }
+        }
+
+        int hookID = IO::deviceEventHandler.add(updateDeviceNode);
     }
 
     void mount(MountPoint MP, const string& path) {
@@ -189,19 +207,19 @@ namespace BSD::VFS::DeviceFS {
         auto it = indexNodes.find(name);
         if(it == indexNodes.end()) return nullptr;
 
-        auto IN = it->second;
-        if(!IN) return nullptr;
+        auto indexNode = it->second;
+        if(!indexNode) return nullptr;
 
-        auto VN = IN->VN.lock();
-        if(!VN) {
-            IN->VN = VN = make_shared<VirtualNode>(VirtualNode {
-                .type = IN->isCharacter ? VirtualNode::Type::Character : VirtualNode::Type::Block,
-                .deviceID = IN->deviceID,
-                .operations = BSD::VFS::SpecialFS::VNO
+        auto virtualNode = indexNode->virtualNode.lock();
+        if(!virtualNode) {
+            indexNode->virtualNode = virtualNode = make_shared<VirtualNode>(VirtualNode {
+                .type = indexNode->isCharacter ? VirtualNode::Type::Character : VirtualNode::Type::Block,
+                .deviceID = indexNode->deviceID,
+                .operations = SpecialFS::virtualNodeOperations
             });
         }
 
-        return VN;
+        return virtualNode;
     };
 
     auto deviceFileSystem = VirtualFileSystem {
