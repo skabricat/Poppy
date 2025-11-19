@@ -19,9 +19,8 @@ namespace BSD::VFS {
         struct Operations {
             function<void()> init;
             function<void()> deinit;
-            function<void(MountPoint, const string&)> mount;
-            function<void(MountPoint)> unmount;
-            function<VNSP(MountPoint, const string&)> lookup;
+            function<void(MountPoint&, const string&)> mount;
+            function<void(MountPoint&)> unmount;
         } operations;
     };
 
@@ -35,12 +34,14 @@ namespace BSD::VFS {
             function<string(VNSP)> read;
             function<void(VNSP, const string&)> write;
             function<vector<DirectoryEntry>(VNSP)> readdir;
+            function<VNSP(VNSP, const string&)> lookup;
         } operations;
     };
 
     struct MountPoint {
         string path;
         VFSSP VFS;
+        VNSP rootVN;
     };
 
     struct DirectoryEntry {
@@ -95,15 +96,104 @@ namespace BSD::VFS {
         }
     }
 
-    VNSP lookup(const string& path) {
-        MountPoint* bestMatch = nullptr;
-        for(auto& MP : mountPoints) {
-            if(path.starts_with(MP.path))
-                if(!bestMatch || MP.path.size() > bestMatch->path.size())
-                    bestMatch = &MP;
+    string normalizePath(string_view path) {
+        if(path.empty()) return "/";
+
+        bool absolute = path.front() == '/';
+        vector<string_view> stack;
+        size_t start = 0;
+
+        auto push_token = [&](string_view token) {
+            if(token == "."sv || token.empty()) return;
+
+            if(token == ".."sv) {
+                if(!stack.empty() && stack.back() != ".."sv) {
+                    stack.pop_back();
+                } else
+                if(!absolute) {
+                    stack.push_back(".."sv);
+                }
+            } else {
+                stack.push_back(token);
+            }
+        };
+
+        for(size_t i = 0; i <= path.size(); i++) {
+            if(i == path.size() || path[i] == '/') {
+                if(i > start)
+                    push_token(path.substr(start, i-start));
+                start = i+1;
+            }
         }
-        if(!bestMatch->VFS || !bestMatch->VFS->operations.lookup) return nullptr;
-        return bestMatch->VFS->operations.lookup(*bestMatch, path);
+
+        string out;
+        if(absolute) out.push_back('/');
+
+        for(size_t i = 0; i < stack.size(); i++) {
+            if(i > 0) out.push_back('/');
+            out.append(stack[i]);
+        }
+
+        if(out.empty()) return absolute ? "/" : ".";
+
+        return out;
+    }
+
+    MountPoint* findMount(const string& normPath, vector<MountPoint>& mountPoints) {
+        MountPoint* best = nullptr;
+
+        for(auto& MP : mountPoints) {
+            string m = MP.path;
+            if(m == "/") m = "";  // чтобы "/" совпадал со всем
+
+            if(normPath == m || normPath.starts_with(m+"/")) {
+                if(!best || m.size() > best->path.size())
+                    best = &MP;
+            }
+        }
+        return best;
+    }
+
+    string makeRelative(const string& full, const string& mountPath) {
+        if(mountPath == "/") {
+            if(full == "/") return "";
+            return full.substr(1);
+        }
+
+        if(full == mountPath)
+            return "";
+
+        return full.substr(mountPath.size()+1);
+    }
+
+    VNSP lookup(const string& rawPath) {
+        string path = normalizePath(rawPath);
+        MountPoint* MP = findMount(path, mountPoints);
+        if(!MP || !MP->rootVN)
+            return nullptr;
+
+        path = makeRelative(path, MP->path);
+        if(path.empty())
+            return MP->rootVN;
+
+        VNSP current = MP->rootVN;
+        while(true) {
+            auto pos = path.find('/');
+            string name = (pos == string::npos) ? path : path.substr(0, pos);
+            string rest = (pos == string::npos) ? "" : path.substr(pos+1);
+
+            if(!current->operations.lookup)
+                return nullptr;
+
+            current = current->operations.lookup(current, name);
+            if(!current)
+                return nullptr;
+
+            if(rest.empty())
+                return current;
+
+            path = rest;
+        }
     }
 
     string read(const string& path) {
@@ -159,22 +249,16 @@ namespace BSD::VFS::DeviceFS {
         weak_ptr<VirtualNode> virtualNode;  // Cache
     };
 
-    unordered_map<string, shared_ptr<IndexNode>> indexNodes;
+    unordered_map<string, IndexNode> indexNodes;
     VNSP rootVirtualNode;
 
-    string localName(const string& path) {
-        auto pos = path.find_last_of('/');
-        if(pos == string::npos) return path;
-        return path.substr(pos+1);
-    }
-
-    void createIndexNode(bool isCharacter, IO::DeviceID deviceID, const string& name) {
+    void addIndexNode(bool isCharacter, IO::DeviceID deviceID, const string& name) {
         cout << "[devfs] Created node: " << name << endl;
-        indexNodes[name] = make_shared<IndexNode>(IndexNode {
+        indexNodes[name] = IndexNode {
             .name = name,
             .isCharacter = isCharacter,
             .deviceID = deviceID
-        });
+        };
     }
 
     void updateDeviceNode(IO::DeviceID deviceID, bool isCharacter) {
@@ -191,10 +275,23 @@ namespace BSD::VFS::DeviceFS {
         }
 
         if(!name.empty()) {
-            createIndexNode(isCharacter, deviceID, name);
+            addIndexNode(isCharacter, deviceID, name);
         } else {
-            // destroyDeviceNode(name);
+            // removeDeviceNode(name);
         }
+    }
+
+    VNSP getVirtualNode(IndexNode& indexNode) {
+        auto virtualNode = indexNode.virtualNode.lock();
+        if(!virtualNode) {
+            indexNode.virtualNode = virtualNode = make_shared<VirtualNode>(VirtualNode {
+                .type = indexNode.isCharacter ? VirtualNode::Type::Character : VirtualNode::Type::Block,
+                .deviceID = indexNode.deviceID,
+                .operations = SpecialFS::virtualNodeOperations
+            });
+        }
+
+        return virtualNode;
     }
 
     void init() {
@@ -205,58 +302,41 @@ namespace BSD::VFS::DeviceFS {
             for(auto& [name, indexNode] : indexNodes) {
                 result.push_back({
                     .name = name,
-                    .type = indexNode->isCharacter ? VirtualNode::Type::Character : VirtualNode::Type::Block,
-                    .deviceID = indexNode->deviceID
+                    .type = indexNode.isCharacter ? VirtualNode::Type::Character : VirtualNode::Type::Block,
+                    .deviceID = indexNode.deviceID
                 });
             }
             return result;
         };
+        rootVirtualNode->operations.lookup = [](VNSP, const string& name) -> VNSP {
+            auto it = indexNodes.find(name);
+            if(it == indexNodes.end()) return nullptr;
+            return getVirtualNode(it->second);
+        };
 
         for(auto& [deviceID, device] : IO::blockDevices) {
             if(device && !device->name.empty()) {
-                createIndexNode(false, deviceID, device->name);
+                addIndexNode(false, deviceID, device->name);
             }
         }
         for(auto& [deviceID, device] : IO::characterDevices) {
             if(device && !device->name.empty()) {
-                createIndexNode(true, deviceID, device->name);
+                addIndexNode(true, deviceID, device->name);
             }
         }
 
         int hookID = IO::deviceEventHandler.add(updateDeviceNode);
     }
 
-    void mount(MountPoint MP, const string& path) {}
-
-    VNSP lookup(MountPoint MP, const string& path) {
-        if(path == MP.path) return rootVirtualNode;
-
-        string name = localName(path);
-
-        auto it = indexNodes.find(name);
-        if(it == indexNodes.end()) return nullptr;
-
-        auto indexNode = it->second;
-        if(!indexNode) return nullptr;
-
-        auto virtualNode = indexNode->virtualNode.lock();
-        if(!virtualNode) {
-            indexNode->virtualNode = virtualNode = make_shared<VirtualNode>(VirtualNode {
-                .type = indexNode->isCharacter ? VirtualNode::Type::Character : VirtualNode::Type::Block,
-                .deviceID = indexNode->deviceID,
-                .operations = SpecialFS::virtualNodeOperations
-            });
-        }
-
-        return virtualNode;
-    };
+    void mount(MountPoint& mp, const string& path) {
+        mp.rootVN = rootVirtualNode;
+    }
 
     auto deviceFileSystem = VirtualFileSystem {
         .name = "devfs",
         .operations = {
             .init = init,
-            .mount = mount,
-            .lookup = lookup
+            .mount = mount
         }
     };
 };

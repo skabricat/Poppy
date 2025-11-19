@@ -207,7 +207,6 @@ namespace BSD::VFS {
             function<void()> deinit;
             function<void(MountPoint&, const string&)> mount;
             function<void(MountPoint&)> unmount;
-            function<VNSP(MountPoint&, const string&)> lookup;
         } operations;
     };
 
@@ -228,6 +227,7 @@ namespace BSD::VFS {
     struct MountPoint {
         string path;
         VFSSP VFS;
+        VNSP rootVN;
     };
 
     struct DirectoryEntry {
@@ -332,7 +332,7 @@ namespace BSD::VFS {
             string m = MP.path;
             if(m == "/") m = "";  // чтобы "/" совпадал со всем
 
-            if(normPath == m || normPath.starts_with(m + "/")) {
+            if(normPath == m || normPath.starts_with(m+"/")) {
                 if(!best || m.size() > best->path.size())
                     best = &MP;
             }
@@ -349,19 +349,37 @@ namespace BSD::VFS {
         if(full == mountPath)
             return "";
 
-        return full.substr(mountPath.size() + 1);
+        return full.substr(mountPath.size()+1);
     }
 
     VNSP lookup(const string& rawPath) {
         string path = normalizePath(rawPath);
-
         MountPoint* MP = findMount(path, mountPoints);
-        if(!MP || !MP->VFS || !MP->VFS->operations.lookup)
+        if(!MP || !MP->rootVN)
             return nullptr;
 
-        string relative = makeRelative(path, MP->path);
+        path = makeRelative(path, MP->path);
+        if(path.empty())
+            return MP->rootVN;
 
-        return MP->VFS->operations.lookup(*MP, relative);
+        VNSP current = MP->rootVN;
+        while(true) {
+            auto pos = path.find('/');
+            string name = (pos == string::npos) ? path : path.substr(0, pos);
+            string rest = (pos == string::npos) ? "" : path.substr(pos+1);
+
+            if(!current->operations.lookup)
+                return nullptr;
+
+            current = current->operations.lookup(current, name);
+            if(!current)
+                return nullptr;
+
+            if(rest.empty())
+                return current;
+
+            path = rest;
+        }
     }
 
     string read(const string& path) {
@@ -496,40 +514,15 @@ namespace BSD::VFS::DeviceFS {
         int hookID = IO::deviceEventHandler.add(updateDeviceNode);
     }
 
-    void mount(MountPoint&, const string&) {}
-
-    VNSP lookup(MountPoint&, const string& relative) {
-        if(relative.empty())
-            return rootVirtualNode;
-
-        VNSP current = rootVirtualNode;
-        string path = relative;
-
-        while(true) {
-            auto pos = path.find('/');
-            string name = (pos == string::npos) ? path : path.substr(0, pos);
-            string rest = (pos == string::npos) ? "" : path.substr(pos+1);
-
-            if(!current->operations.lookup)
-                return nullptr;
-
-            current = current->operations.lookup(current, name);
-            if(!current)
-                return nullptr;
-
-            if(rest.empty())
-                return current;
-
-            path = rest;
-        }
+    void mount(MountPoint& mp, const string& path) {
+        mp.rootVN = rootVirtualNode;
     }
 
     auto deviceFileSystem = VirtualFileSystem {
         .name = "devfs",
         .operations = {
             .init = init,
-            .mount = mount,
-            .lookup = lookup
+            .mount = mount
         }
     };
 };
@@ -975,7 +968,7 @@ int main() {
     auto serialID = IOKit::getBSDDeviceID(&serial);
     terminal.attachDevice(serialID);
     serial.onDataReceived.push_back([&](const string& data) { terminal.pushInput(data); });
-    serial.onDataSent.push_back([&](const string& data) { console.write("[serial TX] " + data); });
+    serial.onDataSent.push_back([&](const string& data) { console.write("[serial TX] "+data); });
 
     console.write("Kernel boot OK\n");
     terminal.write("shell> ls -la\n");
@@ -1009,9 +1002,10 @@ int main() {
             IOKit::dumpRegistry(IOKit::rootService);
             continue;
         } else
-        if(inputLine == "ls") {
-            serial.pushFromHardware("Listing /dev:\n");
-            for(auto& dirent : BSD::VFS::readdir("/dev")) {
+        if(inputLine.starts_with("ls ") && inputLine.size() > 3) {
+            string path = inputLine.substr(3);
+            serial.pushFromHardware("Listing: "+path+"\n");
+            for(auto& dirent : BSD::VFS::readdir(path)) {
                 serial.pushFromHardware(dirent.name+"\n");
             }
         } else {
