@@ -193,6 +193,7 @@ namespace BSD::VFS {
     struct VirtualFileSystem;
     struct VirtualNode;
     struct MountPoint;
+    struct DirectoryEntry;
 
     using VFSSP = shared_ptr<VirtualFileSystem>;
     using VNSP = shared_ptr<VirtualNode>;
@@ -204,9 +205,9 @@ namespace BSD::VFS {
         struct Operations {
             function<void()> init;
             function<void()> deinit;
-            function<void(MountPoint, const string&)> mount;
-            function<void(MountPoint)> unmount;
-            function<VNSP(MountPoint, const string&)> lookup;
+            function<void(MountPoint&, const string&)> mount;
+            function<void(MountPoint&)> unmount;
+            function<VNSP(MountPoint&, const string&)> lookup;
         } operations;
     };
 
@@ -219,12 +220,20 @@ namespace BSD::VFS {
             function<void(VNSP)> close;
             function<string(VNSP)> read;
             function<void(VNSP, const string&)> write;
+            function<vector<DirectoryEntry>(VNSP)> readdir;
+            function<VNSP(VNSP, const string&)> lookup;
         } operations;
     };
 
     struct MountPoint {
         string path;
         VFSSP VFS;
+    };
+
+    struct DirectoryEntry {
+        string name;
+        VirtualNode::Type type;
+        IO::DeviceID deviceID = 0;
     };
 
     unordered_map<string, VFSSP> virtualFileSystems;
@@ -273,15 +282,86 @@ namespace BSD::VFS {
         }
     }
 
-    VNSP lookup(const string& path) {
-        MountPoint* bestMatch = nullptr;
-        for(auto& MP : mountPoints) {
-            if(path.starts_with(MP.path))
-                if(!bestMatch || MP.path.size() > bestMatch->path.size())
-                    bestMatch = &MP;
+    string normalizePath(string_view path) {
+        if(path.empty()) return "/";
+
+        bool absolute = path.front() == '/';
+        vector<string_view> stack;
+        size_t start = 0;
+
+        auto push_token = [&](string_view token) {
+            if(token == "."sv || token.empty()) return;
+
+            if(token == ".."sv) {
+                if(!stack.empty() && stack.back() != ".."sv) {
+                    stack.pop_back();
+                } else
+                if(!absolute) {
+                    stack.push_back(".."sv);
+                }
+            } else {
+                stack.push_back(token);
+            }
+        };
+
+        for(size_t i = 0; i <= path.size(); i++) {
+            if(i == path.size() || path[i] == '/') {
+                if(i > start)
+                    push_token(path.substr(start, i-start));
+                start = i+1;
+            }
         }
-        if(!bestMatch->VFS || !bestMatch->VFS->operations.lookup) return nullptr;
-        return bestMatch->VFS->operations.lookup(*bestMatch, path);
+
+        string out;
+        if(absolute) out.push_back('/');
+
+        for(size_t i = 0; i < stack.size(); i++) {
+            if(i > 0) out.push_back('/');
+            out.append(stack[i]);
+        }
+
+        if(out.empty()) return absolute ? "/" : ".";
+
+        return out;
+    }
+
+    MountPoint* findMount(const string& normPath, vector<MountPoint>& mountPoints) {
+        MountPoint* best = nullptr;
+
+        for(auto& MP : mountPoints) {
+            string m = MP.path;
+            if(m == "/") m = "";  // чтобы "/" совпадал со всем
+
+            if(normPath == m || normPath.starts_with(m + "/")) {
+                if(!best || m.size() > best->path.size())
+                    best = &MP;
+            }
+        }
+        return best;
+    }
+
+    string makeRelative(const string& full, const string& mountPath) {
+        if(mountPath == "/") {
+            if(full == "/") return "";
+            return full.substr(1);
+        }
+
+        if(full == mountPath)
+            return "";
+
+        return full.substr(mountPath.size() + 1);
+    }
+
+    VNSP lookup(const string& rawPath) {
+        string path = normalizePath(rawPath);
+
+        MountPoint* MP = findMount(path, mountPoints);
+        if(!MP || !MP->VFS || !MP->VFS->operations.lookup)
+            return nullptr;
+
+        string relative = makeRelative(path, MP->path);
+
+        return MP->VFS->operations.lookup(*MP, relative);
     }
 
     string read(const string& path) {
@@ -293,6 +373,15 @@ namespace BSD::VFS {
     void write(const string& path, const string& data) {
         auto virtualNode = lookup(path);
         if(virtualNode && virtualNode->operations.write) virtualNode->operations.write(virtualNode, data);
+    }
+
+    vector<DirectoryEntry> readdir(const string& path) {
+        auto node = lookup(path);
+        if(!node || node->type != VirtualNode::Type::Directory)
+            return {};
+        if(node->operations.readdir)
+            return node->operations.readdir(node);
+        return {};
     }
 }
 
@@ -328,21 +417,16 @@ namespace BSD::VFS::DeviceFS {
         weak_ptr<VirtualNode> virtualNode;  // Cache
     };
 
-    unordered_map<string, shared_ptr<IndexNode>> indexNodes;
+    unordered_map<string, IndexNode> indexNodes;
+    VNSP rootVirtualNode;
 
-    string localName(const string& path) {
-        auto pos = path.find_last_of('/');
-        if(pos == string::npos) return path;
-        return path.substr(pos+1);
-    }
-
-    void createDeviceNode(bool isCharacter, IO::DeviceID deviceID, const string& name) {
+    void addIndexNode(bool isCharacter, IO::DeviceID deviceID, const string& name) {
         cout << "[devfs] Created node: " << name << endl;
-        indexNodes[name] = make_shared<IndexNode>(IndexNode {
+        indexNodes[name] = IndexNode {
             .name = name,
             .isCharacter = isCharacter,
             .deviceID = deviceID
-        });
+        };
     }
 
     void updateDeviceNode(IO::DeviceID deviceID, bool isCharacter) {
@@ -359,54 +443,86 @@ namespace BSD::VFS::DeviceFS {
         }
 
         if(!name.empty()) {
-            createDeviceNode(isCharacter, deviceID, name);
+            addIndexNode(isCharacter, deviceID, name);
         } else {
-            // destroyDeviceNode(name);
+            // removeDeviceNode(name);
         }
     }
 
+    VNSP getVirtualNode(IndexNode& indexNode) {
+        auto virtualNode = indexNode.virtualNode.lock();
+        if(!virtualNode) {
+            indexNode.virtualNode = virtualNode = make_shared<VirtualNode>(VirtualNode {
+                .type = indexNode.isCharacter ? VirtualNode::Type::Character : VirtualNode::Type::Block,
+                .deviceID = indexNode.deviceID,
+                .operations = SpecialFS::virtualNodeOperations
+            });
+        }
+
+        return virtualNode;
+    }
+
     void init() {
+        rootVirtualNode = make_shared<VirtualNode>();
+        rootVirtualNode->type = VirtualNode::Type::Directory;
+        rootVirtualNode->operations.readdir = [](VNSP) {
+            vector<DirectoryEntry> result;
+            for(auto& [name, indexNode] : indexNodes) {
+                result.push_back({
+                    .name = name,
+                    .type = indexNode.isCharacter ? VirtualNode::Type::Character : VirtualNode::Type::Block,
+                    .deviceID = indexNode.deviceID
+                });
+            }
+            return result;
+        };
+        rootVirtualNode->operations.lookup = [](VNSP, const string& name) -> VNSP {
+            auto it = indexNodes.find(name);
+            if(it == indexNodes.end()) return nullptr;
+            return getVirtualNode(it->second);
+        };
+
         for(auto& [deviceID, device] : IO::blockDevices) {
             if(device && !device->name.empty()) {
-                createDeviceNode(false, deviceID, device->name);
+                addIndexNode(false, deviceID, device->name);
             }
         }
         for(auto& [deviceID, device] : IO::characterDevices) {
             if(device && !device->name.empty()) {
-                createDeviceNode(true, deviceID, device->name);
+                addIndexNode(true, deviceID, device->name);
             }
         }
 
         int hookID = IO::deviceEventHandler.add(updateDeviceNode);
     }
 
-    void mount(MountPoint MP, const string& path) {
-    //    auto root = make_shared<VirtualNode>();
-    //    root->type = VirtualNode::Type::Directory;
-    };
+    void mount(MountPoint&, const string&) {}
 
-    VNSP lookup(MountPoint MP, const string& path) {
-        if(!MP.VFS) return nullptr;
+    VNSP lookup(MountPoint&, const string& relative) {
+        if(relative.empty())
+            return rootVirtualNode;
 
-        string name = localName(path);
+        VNSP current = rootVirtualNode;
+        string path = relative;
 
-        auto it = indexNodes.find(name);
-        if(it == indexNodes.end()) return nullptr;
+        while(true) {
+            auto pos = path.find('/');
+            string name = (pos == string::npos) ? path : path.substr(0, pos);
+            string rest = (pos == string::npos) ? "" : path.substr(pos+1);
 
-        auto indexNode = it->second;
-        if(!indexNode) return nullptr;
+            if(!current->operations.lookup)
+                return nullptr;
 
-        auto virtualNode = indexNode->virtualNode.lock();
-        if(!virtualNode) {
-            indexNode->virtualNode = virtualNode = make_shared<VirtualNode>(VirtualNode {
-                .type = indexNode->isCharacter ? VirtualNode::Type::Character : VirtualNode::Type::Block,
-                .deviceID = indexNode->deviceID,
-                .operations = SpecialFS::virtualNodeOperations
-            });
+            current = current->operations.lookup(current, name);
+            if(!current)
+                return nullptr;
+
+            if(rest.empty())
+                return current;
+
+            path = rest;
         }
-
-        return virtualNode;
-    };
+    }
 
     auto deviceFileSystem = VirtualFileSystem {
         .name = "devfs",
@@ -494,8 +610,8 @@ namespace IOKit {
             return true;
         }
 
-        bool provides(IOService* provider) {
-            for(IOService* p = provider; p != nullptr; p = p->provider) {
+        bool isAncestor(IOService* ofService) {
+            for(IOService* p = ofService; p != nullptr; p = p->provider) {
                 if(p == this)
                     return true;
             }
@@ -504,7 +620,7 @@ namespace IOKit {
         }
 
         bool matches(IOService* provider) {
-            if(provides(provider)) {
+            if(isAncestor(provider)) {  // Break cycle
                 return false;
             }
 
@@ -565,7 +681,7 @@ namespace IOKit {
             if(provider != nullptr)
                 return false;
 
-            if(provides(toProvider)) {
+            if(isAncestor(toProvider)) {  // Break cycle
                 return false;
             }
 
@@ -854,7 +970,6 @@ int main() {
     auto& fb0     = IOKit::addService<IOKit::Services::IOFramebuffer>();
     auto& serial  = IOKit::addService<IOKit::Services::IOSerial>();
     IOKit::matchAndStartDevices();
-    IOKit::dumpRegistry(IOKit::rootService);
 
     auto& terminal = BSD::TTY::createTerminal(100);
     auto serialID = IOKit::getBSDDeviceID(&serial);
@@ -877,6 +992,34 @@ int main() {
     cout << "Reading from TTY buffer: " << terminal.read() << endl;
     cout << "Reading directly from /dev/tty0 via VFS: "
          << BSD::VFS::read("/dev/tty0") << endl;
+
+    console.write("Single-user mode started\n");
+    string inputLine;
+
+    while(true) {
+        serial.write("shell> ");
+        getline(cin, inputLine);
+        if(inputLine == "exit") {
+            break;
+        } else
+        if(inputLine == "help") {
+            serial.pushFromHardware("help, exit, iotree, ls\n");
+        } else
+        if(inputLine == "iotree") {
+            IOKit::dumpRegistry(IOKit::rootService);
+            continue;
+        } else
+        if(inputLine == "ls") {
+            serial.pushFromHardware("Listing /dev:\n");
+            for(auto& dirent : BSD::VFS::readdir("/dev")) {
+                serial.pushFromHardware(dirent.name+"\n");
+            }
+        } else {
+            serial.pushFromHardware(inputLine+"\n");
+        }
+        string output = terminal.read();
+        serial.write(output);
+    }
 
     return 0;
 }
