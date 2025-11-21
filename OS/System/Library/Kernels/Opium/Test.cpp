@@ -6,6 +6,7 @@
 #include <variant>
 #include <vector>
 #include <memory>
+#include <filesystem>
 
 using namespace std;
 
@@ -282,47 +283,8 @@ namespace BSD::VFS {
         }
     }
 
-    string normalizePath(string_view path) {
-        if(path.empty()) return "/";
-
-        bool absolute = path.front() == '/';
-        vector<string_view> stack;
-        size_t start = 0;
-
-        auto push_token = [&](string_view token) {
-            if(token == "."sv || token.empty()) return;
-
-            if(token == ".."sv) {
-                if(!stack.empty() && stack.back() != ".."sv) {
-                    stack.pop_back();
-                } else
-                if(!absolute) {
-                    stack.push_back(".."sv);
-                }
-            } else {
-                stack.push_back(token);
-            }
-        };
-
-        for(size_t i = 0; i <= path.size(); i++) {
-            if(i == path.size() || path[i] == '/') {
-                if(i > start)
-                    push_token(path.substr(start, i-start));
-                start = i+1;
-            }
-        }
-
-        string out;
-        if(absolute) out.push_back('/');
-
-        for(size_t i = 0; i < stack.size(); i++) {
-            if(i > 0) out.push_back('/');
-            out.append(stack[i]);
-        }
-
-        if(out.empty()) return absolute ? "/" : ".";
-
-        return out;
+    string normalizePath(const string& path) {
+        return filesystem::path(path).lexically_normal().string();
     }
 
     MountPoint* findMount(const string& normPath, vector<MountPoint>& mountPoints) {

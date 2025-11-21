@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Std.cpp"
-#include "BSD/IO.cpp"
+#include "IO.cpp"
 
 namespace BSD::TTY {
     struct Terminal {

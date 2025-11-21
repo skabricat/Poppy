@@ -1,11 +1,8 @@
-#include "Std.cpp"
 #include "KPL/KPL.cpp"
 #include "Mach/Mach.cpp"
 #include "BSD/BSD.cpp"
 #include "IOKit/IOKit.cpp"
 #include "KEM/KEM.cpp"
-
-namespace Opium {};
 
 int main() {
     auto& console = IOKit::addService<IOKit::Services::IOConsole>();
@@ -17,7 +14,7 @@ int main() {
     auto serialID = IOKit::getBSDDeviceID(&serial);
     terminal.attachDevice(serialID);
     serial.onDataReceived.push_back([&](const string& data) { terminal.pushInput(data); });
-    serial.onDataSent.push_back([&](const string& data) { console.write("[serial TX] " + data); });
+    serial.onDataSent.push_back([&](const string& data) { console.write("[serial TX] "+data); });
 
     console.write("Kernel boot OK\n");
     terminal.write("shell> ls -la\n");
@@ -51,9 +48,10 @@ int main() {
             IOKit::dumpRegistry(IOKit::rootService);
             continue;
         } else
-        if(inputLine == "ls") {
-            serial.pushFromHardware("Listing /dev:\n");
-            for(auto& dirent : BSD::VFS::readdir("/dev")) {
+        if(inputLine.starts_with("ls ") && inputLine.size() > 3) {
+            string path = inputLine.substr(3);
+            serial.pushFromHardware("Listing: "+path+"\n");
+            for(auto& dirent : BSD::VFS::readdir(path)) {
                 serial.pushFromHardware(dirent.name+"\n");
             }
         } else {

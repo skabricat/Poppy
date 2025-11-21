@@ -1,5 +1,5 @@
 #pragma once
 
-#include "BSD/VFS.cpp"
-#include "BSD/TTY.cpp"
-#include "BSD/Scheduling.cpp"
+#include "VFS.cpp"
+#include "TTY.cpp"
+#include "Scheduling.cpp"
