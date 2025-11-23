@@ -1,8 +1,6 @@
 #include <iostream>
 #include <filesystem>
 #include <vector>
-#include <fstream>
-#include <sstream>
 #include <string>
 #include <map>
 #include <memory>
@@ -12,7 +10,6 @@
 #include <functional>
 #include <condition_variable>
 #include <random>
-#include <algorithm>
 #include <deque>
 
 #include <libudev.h>
@@ -20,290 +17,205 @@
 using namespace std;
 
 namespace KPL {
-
-    // -----------------------
-    //   DEVICE STRUCTURE
-    // -----------------------
     struct Device {
-        string ID;
-        string name;
-        string subsystem;
-
-        string vendorID;
-        string productID;
-        string driver;
-        string deviceNode;
-
+        string ID, name, subsystem, node, driver;
         map<string, string> properties;
+
+        Device(udev_device* dev) {
+            ID = udev_device_get_syspath(dev) ?: "";
+            name = filesystem::path(ID).filename().string();
+            subsystem = udev_device_get_subsystem(dev) ?: "";
+            node = udev_device_get_devnode(dev) ?: "";
+            driver = udev_device_get_driver(dev) ?: "";
+
+            udev_list_entry* attributeEntries = udev_device_get_sysattr_list_entry(dev);
+            udev_list_entry* attributeEntry;
+
+            udev_list_entry_foreach(attributeEntry, attributeEntries) {
+                const char* k = udev_list_entry_get_name(attributeEntry);
+                const char* v = udev_device_get_sysattr_value(dev, k);
+
+                if(k && v) properties[k] = v;
+            }
+        }
     };
 
-    // -----------------------
-    //   GLOBAL STORAGE
-    // -----------------------
-    static vector<Device> g_devices;
-    static mutex g_devMutex;
+    using DeviceEventCallback = function<void(const string& action, const Device&)>;
 
-    // observers receive "device added" / "device removed" / "changed"
-    using DeviceEventCallback =
-        function<void(const string& action, const Device&)>;
+    vector<Device> devices;
+    vector<DeviceEventCallback> deviceObservers;
 
-    static vector<DeviceEventCallback> g_callbacks;
-    static mutex g_cbMutex;
+    mutex devicesMutex,
+          deviceObserversMutex;
 
-    // worker thread control
-    static atomic<bool> g_monitorRunning = false;
-    static thread g_monitorThread;
+    atomic<bool> deviceMonitorRunning = false;
+    thread deviceMonitorThread;
 
-    // -----------------------
-    //  DEVICE ENUMERATION
-    // -----------------------
+    void addDeviceObserver(DeviceEventCallback observer) {
+        lock_guard lock(deviceObserversMutex);
 
-    Device makeDeviceFromUdev(udev_device* dev) {
-        Device d;
-
-        const char* path = udev_device_get_syspath(dev);
-        if(path)
-            d.ID = path;
-
-        d.name = filesystem::path(d.ID).filename().string();
-
-        if(auto v = udev_device_get_subsystem(dev)) d.subsystem = v;
-        if(auto v = udev_device_get_devnode(dev))   d.deviceNode = v;
-        if(auto v = udev_device_get_driver(dev))    d.driver = v;
-
-        // sysattrs
-        udev_list_entry* attrs = udev_device_get_sysattr_list_entry(dev);
-        udev_list_entry* a;
-
-        udev_list_entry_foreach(a, attrs) {
-            const char* name = udev_list_entry_get_name(a);
-            const char* val  = udev_device_get_sysattr_value(dev, name);
-            if(name && val)
-                d.properties[name] = val;
-        }
-
-        // vendor/product IDs from udev properties
-        if(auto v = udev_device_get_property_value(dev, "ID_VENDOR_ID"))
-            d.vendorID = v;
-        else if(d.properties.contains("vendor"))
-            d.vendorID = d.properties["vendor"];
-        else if(d.properties.contains("idVendor"))
-            d.vendorID = d.properties["idVendor"];
-
-        if(auto v = udev_device_get_property_value(dev, "ID_MODEL_ID"))
-            d.productID = v;
-        else if(d.properties.contains("device"))
-            d.productID = d.properties["device"];
-        else if(d.properties.contains("idProduct"))
-            d.productID = d.properties["idProduct"];
-
-        return d;
+        deviceObservers.push_back(observer);
     }
 
+    void notifyDeviceObservers(const string& action, const Device& device) {
+        lock_guard lock(deviceObserversMutex);
 
-    vector<Device> getDevices() {
-        vector<Device> result;
+        for(DeviceEventCallback& observer : deviceObservers) {
+            observer(action, device);
+        }
+    }
+
+    void loadDevices() {
+        lock_guard lock(devicesMutex);
         udev* udev = udev_new();
-        if(!udev)
-            return result;
+
+        if(!udev) {
+            return;
+        }
 
         udev_enumerate* enumerate = udev_enumerate_new(udev);
+
         udev_enumerate_add_match_subsystem(enumerate, NULL);
         udev_enumerate_scan_devices(enumerate);
 
-        udev_list_entry* devices = udev_enumerate_get_list_entry(enumerate);
-        udev_list_entry* entry;
+        udev_list_entry* deviceEntries = udev_enumerate_get_list_entry(enumerate);
+        udev_list_entry* deviceEntry;
 
-        udev_list_entry_foreach(entry, devices) {
-            const char* path = udev_list_entry_get_name(entry);
+        udev_list_entry_foreach(deviceEntry, deviceEntries) {
+            const char* path = udev_list_entry_get_name(deviceEntry);
             udev_device* dev = udev_device_new_from_syspath(udev, path);
 
-            if(!dev) continue;
+            if(!dev) {
+                continue;
+            }
 
-            result.push_back(makeDeviceFromUdev(dev));
+            Device device = dev;
+
+            devices.push_back(device);
             udev_device_unref(dev);
+            notifyDeviceObservers("add", device);
         }
 
         udev_enumerate_unref(enumerate);
         udev_unref(udev);
-        return result;
     }
 
-    // -----------------------
-    //  CALLBACK REGISTRATION
-    // -----------------------
-    void addDeviceObserver(DeviceEventCallback cb) {
-        lock_guard lock(g_cbMutex);
-        g_callbacks.push_back(cb);
+    vector<Device> getDevices() {
+        lock_guard lock(devicesMutex);
+
+        return devices;
     }
 
-    static void notifyCallbacks(const string& action, const Device& d) {
-        lock_guard lock(g_cbMutex);
-        for(auto& cb : g_callbacks)
-            cb(action, d);
-    }
-
-
-    // -----------------------
-    //  DEVICE MONITOR THREAD
-    // -----------------------
-    void monitorThreadFunc() {
+    void deviceMonitorLoop() {
         udev* udev = udev_new();
-        if(!udev) return;
 
-        udev_monitor* mon = udev_monitor_new_from_netlink(udev, "kernel");
-        if(!mon) {
-            udev_unref(udev);
+        if(!udev) {
             return;
         }
 
-        udev_monitor_filter_add_match_subsystem_devtype(mon, NULL, NULL);
-        udev_monitor_enable_receiving(mon);
+        udev_monitor* monitor = udev_monitor_new_from_netlink(udev, "kernel");
 
-        int fd = udev_monitor_get_fd(mon);
-        g_monitorRunning = true;
+        if(!monitor) {
+            udev_unref(udev);
 
-        while(g_monitorRunning) {
-            fd_set fds;
-            FD_ZERO(&fds);
-            FD_SET(fd, &fds);
-            timeval tv = {1, 0}; // 1-second timeout
-            int ret = select(fd+1, &fds, NULL, NULL, &tv);
+            return;
+        }
 
-            if(ret <= 0) {
+        udev_monitor_filter_add_match_subsystem_devtype(monitor, NULL, NULL);
+        udev_monitor_enable_receiving(monitor);
+
+        int FD = udev_monitor_get_fd(monitor);
+
+        while(deviceMonitorRunning) {
+            fd_set FDs;
+            FD_ZERO(&FDs);
+            FD_SET(FD, &FDs);
+            timeval TV = {1, 0};  // 1-second timeout
+
+            if(select(FD+1, &FDs, NULL, NULL, &TV) <= 0) {
                 continue;
             }
 
-            if(FD_ISSET(fd, &fds)) {
-                udev_device* dev = udev_monitor_receive_device(mon);
-                if(dev) {
-                    const char* action = udev_device_get_action(dev);
-                    string act = action ? action : "change";
-                    Device d = makeDeviceFromUdev(dev);
+            if(FD_ISSET(FD, &FDs)) {
+                if(udev_device* dev = udev_monitor_receive_device(monitor)) {
+                    string action = udev_device_get_action(dev) ?: "change";
+                    Device device = dev;
 
                     {
-                        lock_guard lock(g_devMutex);
+                        lock_guard lock(devicesMutex);
 
-                        if(act == "add") {
-                            g_devices.push_back(d);
-                        }
-                        else if(act == "remove") {
-                            g_devices.erase(remove_if(g_devices.begin(),
-                                                      g_devices.end(),
-                                [&](auto& x){ return x.ID == d.ID; }),
-                                g_devices.end());
-                        }
-                        else { // change
-                            for(auto& x : g_devices)
-                                if(x.ID == d.ID)
-                                    x = d;
+                        if(action == "add") {
+                            devices.push_back(device);
+                        } else
+                        if(action == "remove") {
+                            devices.erase(remove_if(devices.begin(), devices.end(), [&](Device& x) { return x.ID == device.ID; }), devices.end());
+                        } else
+                        for(Device& x : devices) {
+                            if(x.ID == device.ID) {
+                                x = device;
+                            }
                         }
                     }
 
-                    notifyCallbacks(act, d);
+                    notifyDeviceObservers(action, device);
                     udev_device_unref(dev);
                 }
             }
         }
 
-        udev_monitor_unref(mon);
+        udev_monitor_unref(monitor);
         udev_unref(udev);
     }
 
-
-    // -----------------------
-    //  PUBLIC CONTROL API
-    // -----------------------
     void startDeviceObservation() {
-        if(g_monitorRunning) return;
-
-        {
-            lock_guard lock(g_devMutex);
-            g_devices = getDevices();
+        if(!deviceMonitorRunning) {
+            deviceMonitorRunning = true;
+            deviceMonitorThread = thread(deviceMonitorLoop);
         }
-
-        // notify initial load
-        for (auto& d : g_devices) {
-            notifyCallbacks("initial", d);
-        }
-
-        g_monitorThread = thread(monitorThreadFunc);
     }
 
     void stopDeviceObservation() {
-        g_monitorRunning = false;
-        if(g_monitorThread.joinable())
-            g_monitorThread.join();
+        if(deviceMonitorRunning) {
+            deviceMonitorRunning = false;
+
+            if(deviceMonitorThread.joinable()) {
+                deviceMonitorThread.join();
+            }
+        }
     }
-
-    vector<Device> getCurrentDeviceSnapshot() {
-        lock_guard lock(g_devMutex);
-        return g_devices;
-    }
-
-} // namespace KPL
-
-// ==============================================
-// UI helpers
-// ==============================================
-
-void clearScreen() {
-    cout << "\033[H\033[2J\033[3J";
 }
-
-// Форматируем короткое имя устройства
-string formatDevice(const KPL::Device& d) {
-    string s = d.name;
-    if(!d.subsystem.empty()) s += " S: " + d.subsystem;
-    if(!d.vendorID.empty())  s += " V: " + d.vendorID;
-    if(!d.productID.empty()) s += " P: " + d.productID;
-    return s;
-}
-
-// Печать экрана
-void printScreen(const deque<string>& logLines) {
-    clearScreen();
-
-    cout << "==== Device Event Log (" << logLines.size() << " entries) ====\n\n";
-    for(const auto& line : logLines) {
-        cout << line << "\n";
-    }
-    cout << flush;
-}
-
-
-// ==============================================
-// MAIN
-// ==============================================
 
 int main() {
-    constexpr int MAX_LINES = 48;
     deque<string> logLines;
+    int maxLines = 48;
 
-    // Добавляем наблюдателя на устройства
-    KPL::addDeviceObserver([&](const string& action, const KPL::Device& d){
-        // Формируем строчку
-        string line = action + "  " + formatDevice(d);
+    KPL::addDeviceObserver([&](const string& action, const KPL::Device& device){
+        string line = action+"  "+device.name;
 
-        // Добавляем в лог
+        if(!device.subsystem.empty()) line += " ["+device.subsystem+"]";
+        if(!device.node.empty())      line += " Node: "+device.node;
+        if(!device.driver.empty())    line += " Driver: "+device.driver;
+
         logLines.push_back(line);
 
-        // Ограничиваем размер
-        if(logLines.size() > MAX_LINES)
+        if(logLines.size() > maxLines) {
             logLines.pop_front();
+        }
 
-        // Перерисовываем
-        printScreen(logLines);
+        cout << "\033[H\033[2J\033[3J";
+        cout << "==== Device Event Log (" << logLines.size() << " entries) ====\n\n";
+
+        for(const string& line : logLines) {
+            cout << line << "\n";
+        }
+
+        cout << flush;
     });
 
-    // Запускаем монитор
+    KPL::loadDevices();
     KPL::startDeviceObservation();
-
-    // Главный цикл
-    while(true) {
-        this_thread::sleep_for(chrono::seconds(1));
-    }
-
+    this_thread::sleep_for(chrono::seconds(30));
     KPL::stopDeviceObservation();
+
     return 0;
 }
