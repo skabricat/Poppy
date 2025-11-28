@@ -1,3 +1,0 @@
-# Poppy Kernel ("Opium")
-
-Placeholder.

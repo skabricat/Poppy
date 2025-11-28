@@ -1,7 +1,0 @@
-**/*.FreeBSD-x64
-**/*.FreeBSD-x86
-**/*.Linux-x64
-**/*.Linux-x86
-**/*.sublime-workspace
-**/NW.lnk
-**/package-lock.json

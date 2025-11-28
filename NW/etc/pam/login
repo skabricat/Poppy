@@ -1,3 +1,0 @@
-auth	sufficient	unix.dylib
-auth	required	opendirectory.dylib
-session	required	uwtmp.dylib
